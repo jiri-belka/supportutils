@@ -1571,4 +1571,23 @@ get_sles_ver() {
 	fi
 }
 
+expand_globs_to_paths() {
+	local pattern file nullglob
+	local -a results=()
 
+	shopt -q nullglob && nullglob=1
+
+	shopt -s nullglob
+
+	for pattern in "$@"; do
+		for file in $pattern; do
+			if [[ -e $file ]]; then
+				results+=( "$(realpath -e -- "$file")" )
+			fi
+		done
+	done
+
+	[[ $nullglob ]] || shopt -u nullglob
+
+	printf '%s\n' "${results[@]}" | awk '!seen[$0]++'
+}
