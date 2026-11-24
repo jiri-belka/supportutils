@@ -2916,6 +2916,64 @@ ha_info() {
 			log_cmd $OF 'systemctl status hawk-backend.service'
 			log_cmd $OF 'systemctl status hawk.service'
 
+			# an attempt to collect config used by effective RA primitives
+			if [[ -n "$CURRENT_CIB" ]]; then
+				CURRENT_PRIMITIVES=$(xmllint --xpath '//primitive/@type' "$CURRENT_CIB" 2>/dev/null | \
+					grep -Po 'type="\K[^"]+' | \
+					sort -u
+				)
+				if [[ -n "$CURRENT_PRIMITIVES" ]]; then
+					primitives_regex=$(printf '%s\n' "$CURRENT_PRIMITIVES" | sed -e 's/[.[\*^$(){}+?|/]/\\&/g' | paste -sd'|' -)
+					awk_query_reskey_configs() {
+						local awk_script
+						read -r -d '' awk_script <<'AWK'
+{
+	p = "OCF_RESKEY_[[:alnum:]_]*(conf(ig)?)(uration|_?file)*_default:?=[^[:space:]#]+"
+	if (match($0, p)) {
+		fname = FILENAME
+		sub(/^.*\//, "", fname)
+		m = substr($0, RSTART, RLENGTH)
+		split(m, kv, "=")
+		sub(/^OCF_RESKEY_/, "", kv[1])
+		sub(/:?_default:?$/, "", kv[1])
+		val = kv[2]
+		gsub(/["\x27{}]/, "", val)
+		print fname, kv[1], val
+	}
+}
+AWK
+						awk "$awk_script" "$@"
+					}
+					export -f awk_query_reskey_configs
+
+					mapfile -t RA_CANDIDATES < <(
+						find \
+							/usr/lib/ocf/resource.d/ \
+							/usr/lib64/stonith/plugins/external/ \
+							-type f -regextype egrep -regex '.*/('"$primitives_regex"')$' \
+							-exec bash -c 'awk_query_reskey_configs "$@"' _ {} + 2>/dev/null
+					)
+
+					if [[ -n "${RA_CANDIDATES[*]}" ]]; then
+						for i in "${RA_CANDIDATES[@]}"; do
+							read -r ra conf default <<< "${i}"
+							# explicit
+							mapfile -t RA_CUSTOM_CONFIGS < <(xmllint --xpath '//primitive[@type="'"$ra"'"]//nvpair[@name="'"$conf"'"]/@value' "$CURRENT_CIB" 2>/dev/null | \
+								grep -Po 'value="\K[^"]+' | sort -u
+							)
+							if [[ -n "$RA_CUSTOM_CONFIGS" ]]; then
+								RA_CUSTOM_CONFIG_FILES=()
+								for f in "${RA_CUSTOM_CONFIGS[@]}"; do	 # there might end non-file content
+									[[ -f "$f" ]] && RA_CUSTOM_CONFIG_FILES+=("$f")
+								done
+								(( ${#RA_CUSTOM_CONFIG_FILES[@]} > 0 )) && conf_files $OF "${RA_CUSTOM_CONFIG_FILES[@]}"
+							elif [[ -n "$default" ]] && [[ -f "$default" ]]; then
+								conf_files $OF "$default"
+							fi
+						done
+					fi
+				fi
+			fi
 			echolog Done
 		else
 			echolog Skipped
